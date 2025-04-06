@@ -8,6 +8,7 @@
 const int LED_PINS[8] = {22, 5, 6, 26, 23, 24, 25, 16};
 
 void set_leds(struct gpiod_chip *chip, int state);
+void set_led(struct gpiod_chip *chip, int led, int state);
 
 int main()
 {
@@ -20,11 +21,28 @@ int main()
 
 	while(1)
 	{
-		set_leds(chip, 1);
-		usleep(70000);
-
-		set_leds(chip, 0);
-		usleep(70000);
+		for(int i = 0; i < 8; i++)
+		{
+			usleep(70000);
+			if (i == 0)
+				set_led(chip, i, 1);
+			       // usleep(70000);
+			if (i == 7)
+			{
+				set_led(chip, i-1, 0);
+				set_led(chip, i, 1);
+				usleep(70000);
+				set_led(chip, i, 0);
+				i = -1;
+			       // usleep(70000);
+			}
+			else
+			{
+				set_led(chip, i-1, 0);
+				set_led(chip, i, 1);
+			       // usleep(70000);
+			}
+		}
 	}
 
 	gpiod_chip_close(chip);
@@ -48,4 +66,10 @@ void set_leds(struct gpiod_chip *chip, int state)
 	}
 }
 
-
+void set_led(struct gpiod_chip *chip, int led, int state)
+{
+	struct gpiod_line *line = gpiod_chip_get_line(chip, LED_PINS[led]);
+	gpiod_line_request_output(line, "led_control", 0);
+	gpiod_line_set_value(line, state);
+	gpiod_line_release(line);
+}

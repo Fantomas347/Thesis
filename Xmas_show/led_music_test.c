@@ -32,6 +32,7 @@ volatile uint32_t *gpio = NULL;
 #define LED_LOG_FILE "led_log.csv"
 #define AUDIO_LOG_FILE "audio_log.csv"
 #define MAX_RUNS 60000
+#define LED_THREAD_PERIOD_MS 10
 
 #define CONSUMER "led_seq"
 const unsigned int led_lines[8] = {22, 5, 6, 26, 23, 24, 25, 16};
@@ -172,7 +173,7 @@ void *led_thread_fn(void *arg) {
             if (duration < 70) duration = 70;
             duration = ((duration + 5) / 10) * 10;
 
-            ticks_for_current = duration / 10;
+            ticks_for_current = duration / LED_THREAD_PERIOD_MS;
             tick_count = ticks_for_current;
 
             fprintf(log, "%d,%ld,%ld\n", tick, time_diff_us(start, tick_start), time_diff_us(write_start, write_end));
@@ -182,7 +183,7 @@ void *led_thread_fn(void *arg) {
         if (tick_count == 0) current_index++;
         tick++;
 
-        next_time.tv_nsec += 10 * 1000000;
+        next_time.tv_nsec += LED_THREAD_PERIOD_MS * 1000000;
         while (next_time.tv_nsec >= 1000000000) {
             next_time.tv_sec++;
             next_time.tv_nsec -= 1000000000;

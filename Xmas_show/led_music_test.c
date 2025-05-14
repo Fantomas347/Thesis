@@ -9,7 +9,6 @@
 #include <alsa/asoundlib.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
-#include <gpiod.h>
 
 #include <sys/mman.h>
 
@@ -28,8 +27,8 @@ volatile uint32_t *gpio = NULL;
 #define AUDIO_PERIOD_FRAMES 441
 #define AUDIO_THREAD_PERIOD_MS 30
 #define WAV_HEADER_SIZE 44
-#define FILENAME "california_dreamin.wav"
-#define LED_PATTERN "california_dreamin.txt"
+#define FILENAME "jungle.wav"
+#define LED_PATTERN "jungle.txt"
 #define LED_LOG_FILE "led_log.csv"
 #define AUDIO_LOG_FILE "audio_log.csv"
 #define MAX_RUNS 60000
@@ -45,7 +44,6 @@ typedef struct {
     uint8_t pattern;
 } Pattern;
 
-// Pattern *patterns = NULL;
 static Pattern patterns[MAX_PATTERNS];
 int pattern_count = 0;
 
@@ -53,7 +51,7 @@ static uint32_t gpio_shadow = 0; // shadow register: only update the LEDs whose 
 
 snd_pcm_t *pcm;
 static int16_t audio_data[MAX_AUDIO_FRAMES * 2];
-// int16_t *audio_data = NULL;
+
 size_t audio_frames = 0;
 long runtimes_us[MAX_RUNS];
 long jitter_us[MAX_RUNS];
@@ -107,7 +105,7 @@ void *audio_thread_fn(void *arg) {
         clock_gettime(CLOCK_MONOTONIC, &end_time);
         long jitter = time_diff_us(next_time, start_time);
         if (jitter < 0)
-            fprintf(stderr, "⚠️ Deadline miss at cycle %zu by %ld us\n", runtime_index, -jitter);
+            fprintf(stderr, "Deadline miss at cycle %zu by %ld us\n", runtime_index, -jitter);
 
         runtimes_us[runtime_index] = total_runtime_us;
         wake_intervals_us[runtime_index] = wake_us;
@@ -135,13 +133,6 @@ void *audio_thread_fn(void *arg) {
 }
 
 void *led_thread_fn(void *arg) {
-    struct sched_param sp = {.sched_priority = 80};
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-
-    struct gpiod_chip *chip = gpiod_chip_open_by_number(4);
-    struct gpiod_line_bulk bulk;
-    gpiod_chip_get_lines(chip, (unsigned int *) led_lines, 8, &bulk);
-    gpiod_line_request_bulk_output(&bulk, CONSUMER, NULL);
 
     FILE *log = fopen(LED_LOG_FILE, "w");
     fprintf(log, "tick,time_us,write_time_us\n");
@@ -183,29 +174,27 @@ void *led_thread_fn(void *arg) {
             uint32_t bits_to_clear = (gpio_shadow & ~desired_state) & led_mask;
             uint32_t bits_to_set   = (~gpio_shadow & desired_state) & led_mask;
 
-//            *GPCLR0 = bits_to_clear;
+	    uint32_t set_count = __builtin_popcount(bits_to_set);
+            uint32_t clr_count = __builtin_popcount(bits_to_clear);
+
+/*            if ((set_count | clr_count) == 0) {
+            // No change, skip write
+            } else if (set_count >= clr_count) {
+                *GPSET0 = bits_to_set;
+                __sync_synchronize();
+                *GPCLR0 = bits_to_clear;
+            } else {
+                *GPCLR0 = bits_to_clear;
+                __sync_synchronize();
+                *GPSET0 = bits_to_set;
+            }
+*/
 	    *GPSET0 = bits_to_set;
 	    __sync_synchronize(); // CPU barrier
-//            *GPSET0 = bits_to_set;
             *GPCLR0 = bits_to_clear;
 
             gpio_shadow = desired_state;  // Finally update the shadow to match
 
-	    
-	    
-	    /*            // Update shadow
-            gpio_shadow &= ~clr_mask;
-            gpio_shadow |= set_mask;
-
-            // Now safely update only the LEDs we control
-            uint32_t led_mask = (1u << 5) | (1u << 6) | (1u << 16) | (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
-
-            uint32_t bits_to_clear = (~gpio_shadow) & led_mask;
-            uint32_t bits_to_set   = gpio_shadow & led_mask;
-
-            *GPCLR0 = bits_to_clear;
-            *GPSET0 = bits_to_set;
-*/
             clock_gettime(CLOCK_MONOTONIC, &write_end);
 
             int duration = patterns[current_index].duration_ms;
@@ -230,157 +219,8 @@ void *led_thread_fn(void *arg) {
     }
 
     fclose(log);
-    gpiod_line_release_bulk(&bulk);
-    gpiod_chip_close(chip);
     return NULL;
 }
-
-
-/*
-void *led_thread_fn(void *arg) {
-    struct sched_param sp = {.sched_priority = 80};
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-
-    struct gpiod_chip *chip = gpiod_chip_open_by_number(4);
-    struct gpiod_line_bulk bulk;
-    gpiod_chip_get_lines(chip, (unsigned int *) led_lines, 8, &bulk);
-    gpiod_line_request_bulk_output(&bulk, CONSUMER, NULL);
-
-    FILE *log = fopen(LED_LOG_FILE, "w");
-    fprintf(log, "tick,time_us,write_time_us\n");
-
-    int current_index = 0, tick_count = 0, ticks_for_current = 0;
-    struct timespec start, next_time;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    next_time = start;
-
-    int tick = 0;
-    while (current_index < pattern_count) {
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL);
-
-        struct timespec tick_start, write_start, write_end;
-        clock_gettime(CLOCK_MONOTONIC, &tick_start);
-
-        if (tick_count == 0) {
-            int values[8];
-            for (int j = 0; j < 8; ++j)
-                values[j] = (patterns[current_index].pattern >> (7 - j)) & 1;
-
-            uint32_t set_mask = 0, clr_mask = 0;
-            for (int j = 0; j < 8; ++j) {
-                int pin = led_lines[j];
-                if (values[j]) set_mask |= (1u << pin);
-                else clr_mask |= (1u << pin);
-            }
-
-            clock_gettime(CLOCK_MONOTONIC, &write_start);
-
-            // First clear the bits
-            gpio_shadow &= ~clr_mask;
-            // Then set the new bits
-            gpio_shadow |= set_mask;
-            // Apply the full GPIO shadow
-            *GPCLR0 = 0xFFFFFFFF;        // Clear all bits
-            *GPSET0 = gpio_shadow;       // Set according to shadow
-
-            clock_gettime(CLOCK_MONOTONIC, &write_end);
-
-            int duration = patterns[current_index].duration_ms;
-            if (duration < 70) duration = 70;
-            duration = ((duration + 5) / 10) * 10;
-
-            ticks_for_current = duration / LED_THREAD_PERIOD_MS;
-            tick_count = ticks_for_current;
-
-            fprintf(log, "%d,%ld,%ld\n", tick, time_diff_us(start, tick_start), time_diff_us(write_start, write_end));
-        }
-
-        tick_count--;
-        if (tick_count == 0) current_index++;
-        tick++;
-
-        next_time.tv_nsec += LED_THREAD_PERIOD_MS * 1000000;
-        while (next_time.tv_nsec >= 1000000000) {
-            next_time.tv_sec++;
-            next_time.tv_nsec -= 1000000000;
-        }
-    }
-
-    fclose(log);
-    gpiod_line_release_bulk(&bulk);
-    gpiod_chip_close(chip);
-    return NULL;
-}
-*/
-
-/*
-void *led_thread_fn(void *arg) {
-    struct sched_param sp = {.sched_priority = 80};
-    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
-
-    struct gpiod_chip *chip = gpiod_chip_open_by_number(4);
-    struct gpiod_line_bulk bulk;
-    gpiod_chip_get_lines(chip, (unsigned int *) led_lines, 8, &bulk);
-    gpiod_line_request_bulk_output(&bulk, CONSUMER, NULL);
-
-    FILE *log = fopen(LED_LOG_FILE, "w");
-    fprintf(log, "tick,time_us,write_time_us\n");
-
-    int current_index = 0, tick_count = 0, ticks_for_current = 0;
-    struct timespec start, next_time;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    next_time = start;
-
-    int tick = 0;
-    while (current_index < pattern_count) {
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL);
-
-        struct timespec tick_start, write_start, write_end;
-        clock_gettime(CLOCK_MONOTONIC, &tick_start);
-
-        if (tick_count == 0) {
-            int values[8];
-            for (int j = 0; j < 8; ++j)
-                values[j] = (patterns[current_index].pattern >> (7 - j)) & 1;
-
-            uint32_t set_mask = 0, clr_mask = 0;
-            for (int j = 0; j < 8; ++j) {
-                int pin = led_lines[j];
-                if (values[j]) set_mask |= (1 << pin);
-                else clr_mask |= (1 << pin);
-            }
-
-            clock_gettime(CLOCK_MONOTONIC, &write_start);
-            *GPSET0 = set_mask;
-            *GPCLR0 = clr_mask;
-            clock_gettime(CLOCK_MONOTONIC, &write_end);
-
-            int duration = patterns[current_index].duration_ms;
-            if (duration < 70) duration = 70;
-            duration = ((duration + 5) / 10) * 10;
-
-            ticks_for_current = duration / LED_THREAD_PERIOD_MS;
-            tick_count = ticks_for_current;
-
-            fprintf(log, "%d,%ld,%ld\n", tick, time_diff_us(start, tick_start), time_diff_us(write_start, write_end));
-        }
-
-        tick_count--;
-        if (tick_count == 0) current_index++;
-        tick++;
-
-        next_time.tv_nsec += LED_THREAD_PERIOD_MS * 1000000;
-        while (next_time.tv_nsec >= 1000000000) {
-            next_time.tv_sec++;
-            next_time.tv_nsec -= 1000000000;
-        }
-    }
-
-    fclose(log);
-    gpiod_line_release_bulk(&bulk);
-    gpiod_chip_close(chip);
-    return NULL;
-}*/
 
 void setup_alsa(unsigned int sample_rate, unsigned int channels) {
     snd_pcm_hw_params_t *params;
@@ -414,8 +254,6 @@ void load_wav(const char *filename, uint32_t *sample_rate, uint16_t *channels) {
     fseek(f, 22, SEEK_SET); fread(channels, sizeof(uint16_t), 1, f);
 
     audio_frames = data_size / (*channels * sizeof(int16_t));
-//    audio_data = malloc(data_size);
-//    fread(audio_data, 1, data_size, f);
 
     size_t max_bytes = sizeof(audio_data);
     if ((size_t)data_size > max_bytes) {
@@ -445,7 +283,7 @@ void load_patterns(const char *filename) {
 
     while (fgets(line, sizeof(line), f)) {
         if (pattern_count >= MAX_PATTERNS) {
-            fprintf(stderr, "⚠️ Too many patterns! Max allowed is %d\n", MAX_PATTERNS);
+            fprintf(stderr, "Too many patterns! Max allowed is %d\n", MAX_PATTERNS);
             fclose(f);
             exit(1);
         }
@@ -470,36 +308,6 @@ void load_patterns(const char *filename) {
     fclose(f);
 }
 
-/* void load_patterns(const char *filename) {
-    FILE *f = fopen(filename, "r");
-    if (!f) { perror("pattern file"); exit(1); }
-
-    char line[64];
-    int count = 0;
-//    patterns = malloc(sizeof(Pattern) * 1024);
-
-
-
-    while (fgets(line, sizeof(line), f)) {
-        int dur;
-        char bits[10];
-        if (sscanf(line, "%d %9s", &dur, bits) == 2) {
-            if (dur < 70) dur = 70;
-            dur = ((dur + 5) / 10) * 10;
-
-            uint8_t p = 0;
-            for (int i = 0, j = 0; i < 8 && bits[j]; ++j) {
-                if (bits[j] == '.') continue;
-                p = (p << 1) | (bits[j] == '1' ? 1 : 0);
-                ++i;
-            }
-            patterns[count++] = (Pattern){.duration_ms = dur, .pattern = p};
-        }
-    }
-
-    pattern_count = count;
-    fclose(f);
-} */
 
 void save_runtime_log(const char *filename) {
     FILE *f = fopen(filename, "w");
